@@ -1,0 +1,14 @@
+# Use an official lightweight Python runtime as our base layer
+FROM python:3.11-slim
+
+# Set the working directory inside the container's virtual hard drive
+WORKDIR /app
+
+# Copy our generated gRPC stubs and master logic into the container
+COPY master/ /app/
+
+# Install the network communication packages required to run the server
+RUN pip install --no-cache-dir grpcio grpcio-tools
+
+# Tell the container to execute our Python script when it boots up
+CMD ["python", "master_node.py"]

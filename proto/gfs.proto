@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+// This file defines the RPC interface between:
+//  1. Master <-> Chunkservers
+//  2. Client <-> Master
+//  3. Client <-> Chunkservers
+
+package gfs;
+
+// MASTER SERVICE
+// The Master is responsible for metadata management.
+// Clients contact the Master to discover where data is stored.
+// Chunkservers contact the Master to register themselves and send heartbeats.
+
+service MasterService {
+  // Called once when a Chunkserver starts. Registers the server with the Master so it can be used for storage.
+  rpc RegisterChunkserver(RegisterRequest) returns (RegisterReply);
+
+  // Sent periodically by every Chunkserver.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatReply);
+
+  // Client requests creation of a new file. The Master allocates the first chunk and selects initial replica locations.
+  rpc CreateFile(CreateFileRequest) returns (CreateFileReply);
+
+  // Client wants to access a specific chunk of a file. The Master returns chunk ID and addresses of Chunkservers storing that chunk
+  rpc GetChunkLocations(ChunkLocationsRequest)
+  returns (ChunkLocationsReply);
+
+  // Removes a file from the namespace. Actual chunk garbage collection can happen later.)
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileReply);
+}
+
+// CHUNKSERVER SERVICE
+// Chunkservers store raw chunk data.
+// Clients directly call these RPCs after obtaining chunk locations from the Master.
+
+service ChunkService {
+
+  // Read bytes from an existing chunk.
+  rpc ReadChunk(ReadChunkRequest) returns (ReadChunkReply);
+
+  // Write bytes into an existing chunk.
+  rpc WriteChunk(WriteChunkRequest) returns (WriteChunkReply);
+
+  // Append a record to the end of a chunk. The Chunkserver decides the final offset.
+  rpc AppendRecord(AppendRequest) returns (AppendReply);
+
+  // Used by the Master to create replicas. The receiving Chunkserver pulls the chunk from source_address.
+  rpc ReplicateChunk(ReplicateRequest) returns (ReplicateReply);
+}
+
+// MASTER MESSAGE DEFINITIONS
+
+message RegisterRequest {
+  // Unique identifier for this Chunkserver.
+  string chunkserver_id = 1;
+
+  // Address clients can use to contact this Chunkserver.
+  string address = 2;
+}
+
+message RegisterReply {
+  // Indicates whether registration succeeded.
+  bool success = 1;
+}
+
+message HeartbeatRequest {
+  // Sender's ID.
+  string chunkserver_id = 1;
+
+  // Complete list of chunks currently stored on this server. The Master updates its metadata using this list.
+  repeated string chunk_ids = 2;
+
+  // Remaining free disk space. Helps the Master decide where future chunks should be placed.
+  int64 free_space_bytes = 3;
+}
+
+message HeartbeatReply {
+    // Whether the Master successfully received the heartbeat.
+  bool command_acknowledged = 1;
+}
+
+message CreateFileRequest {
+  // Absolute file path requested by the client.
+  string path = 1;
+}
+
+message CreateFileReply {
+  // Chunk allocated for the beginning of the file.
+  string chunk_id = 1;
+
+  // Chunkservers where this chunk should initially be written.
+  repeated string chunkserver_addresses = 2;
+}
+
+message ChunkLocationsRequest {
+  // File being accessed.
+  string path = 1;
+
+  // Index of the desired chunk.
+  int32 chunk_index = 2;
+}
+
+message ChunkLocationsReply {
+  // Internal ID used by Chunkservers.
+  string chunk_id = 1;
+
+  // Replica locations. The client may choose the nearest replica for reads.
+  repeated string chunkserver_addresses = 2;
+}
+
+message DeleteFileRequest {
+  // File to remove.
+  string path = 1;
+}
+
+message DeleteFileReply {
+  // Whether deletion succeeded.
+  bool success = 1;
+}
+
+// CHUNKSERVER MESSAGE DEFINITIONS
+
+message ReadChunkRequest {
+  // Chunk to read.
+  string chunk_id = 1;
+  // Byte offset within the chunk.
+  int32 offset = 2;
+  // Number of bytes requested.
+  int32 length = 3;
+}
+
+message ReadChunkReply {
+  // Raw bytes read from disk.
+  bytes data = 1;
+  // Read status.
+  bool success = 2;
+}
+
+message WriteChunkRequest {
+  // Chunk being modified.
+  string chunk_id = 1;
+
+  // Byte offset inside the chunk.
+  int32 offset = 2;
+
+  // Bytes to write.
+  bytes data = 3;
+}
+
+message WriteChunkReply {
+  // Write status.
+  bool success = 1;
+}
+
+message AppendRequest {
+  // Chunk receiving the append.
+  string chunk_id = 1;
+
+  // Record to append.
+  bytes data = 2;
+}
+
+message AppendReply {
+  // Offset where the record was actually written.
+  int32 offset_written = 1;
+
+  // Append status.
+  bool success = 2;
+}
+
+message ReplicateRequest {
+  // Chunk that needs replication.
+  string chunk_id = 1;
+
+  // Existing replica to copy from.
+  string source_address = 2;
+}
+
+message ReplicateReply {
+  // Replication status.
+  bool success = 1;
+}

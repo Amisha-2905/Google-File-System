@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # --- The GFS Master Node ---
+  master:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.master
+    ports:
+      - "50051:50051" # Exposes the Master port to your host machine (laptop)
+    networks:
+      - gfs-network
+
+  # --- GFS Chunkserver 1 ---
+  chunkserver1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.chunkserver
+    ports:
+      - "50052:50052"
+    volumes:
+      - chunkserver1-data:/data # Attaches a virtual isolated hard drive
+    networks:
+      - gfs-network
+    depends_on:
+      - master # Forces the master container to boot up first
+
+  # --- GFS Chunkserver 2 ---
+  chunkserver2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.chunkserver
+    ports:
+      - "50053:50052" # External port 50053 maps to internal container port 50052
+    volumes:
+      - chunkserver2-data:/data
+    networks:
+      - gfs-network
+    depends_on:
+      - master
+
+  # --- GFS Chunkserver 3 ---
+  chunkserver3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.chunkserver
+    ports:
+      - "50054:50052"
+    volumes:
+      - chunkserver3-data:/data
+    networks:
+      - gfs-network
+    depends_on:
+      - master
+
+# Persistent virtual hard drives for our Chunkservers to store 1MB blocks safely
+volumes:
+  chunkserver1-data:
+  chunkserver2-data:
+  chunkserver3-data:
+
+# The private internal network. Docker's built-in DNS allows containers to
+# find each other by name (e.g., dialing "master:50051") without hardcoded IPs.
+networks:
+  gfs-network:
+    driver: bridge

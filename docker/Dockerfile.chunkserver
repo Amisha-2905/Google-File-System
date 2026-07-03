@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy the chunkserver code and stubs into this container
+COPY chunkserver/ /app/
+
+RUN pip install --no-cache-dir grpcio grpcio-tools
+
+CMD ["python", "chunk_server.py"]
