@@ -57,7 +57,35 @@ class ChunkServer(gfs_pb2_grpc.ChunkServiceServicer):
         raise NotImplementedError("Atomic appends planned for Day 6")
 
     def ReplicateChunk(self, request, context):
-        raise NotImplementedError("Inter-replica copying planned for Day 4")
+        chunk_id = request.chunk_id
+        source_address = request.source_address
+        
+        logging.info(f"[Recovery Client] Initiating block pull for chunk {chunk_id} from source: {source_address}")
+        
+        try:
+            # Connect directly to the surviving chunkserver holding a good copy
+            source_channel = grpc.insecure_channel(source_address)
+            source_stub = gfs_pb2_grpc.ChunkServiceStub(source_channel)
+            
+            # Read the entire chunk block layout profile (1MB size boundary constraint)
+            read_req = gfs_pb2.ReadChunkRequest(chunk_id=chunk_id, offset=0, length=1024*1024)
+            read_res = source_stub.ReadChunk(read_req, timeout=5)
+            
+            if not read_res.success:
+                logging.error(f"[Recovery Pull Failed] Source server refused read request for chunk {chunk_id}")
+                return gfs_pb2.ReplicateChunkReply(success=False)
+                
+            # Write the pulled chunk locally onto our data volume space
+            chunk_path = self._get_chunk_path(chunk_id)
+            with open(chunk_path, "wb+") as f:
+                f.write(read_res.data)
+                
+            logging.info(f"[Recovery Storage] Successfully cloned and saved chunk {chunk_id} locally.")
+            return gfs_pb2.ReplicateChunkReply(success=True)
+            
+        except Exception as e:
+            logging.error(f"[Recovery Fail Trace] Error completing block clone: {e}")
+            return gfs_pb2.ReplicateChunkReply(success=False)
 
 def register_with_master(chunkserver_id, my_address):
     """Attempts to contact the GFS Master node to register this instance."""

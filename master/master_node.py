@@ -17,7 +17,7 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
         self.last_seen: dict[str, float] = {}         
 
         self.dead_chunkservers: set[str] = set()
-        self._lock = threading.Lock()                 
+        self._lock = threading.RLock()                 
 
         self.monitor_thread = threading.Thread(target=self._liveness_monitor_loop, daemon=True)
         self.monitor_thread.start()               # Protects cluster metadata structures
@@ -107,6 +107,63 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
     def DeleteFile(self, request, context):
         raise NotImplementedError("Lazy garbage collection logic planned for Day 8")
     
+    def trigger_rereplication(self, dead_node_id: str):
+        """Finds chunks affected by a node death and commands healthy servers to clone them."""
+        logging.info(f"[Recovery Engine] Scanning for vulnerable chunks previously hosted on dead node: {dead_node_id}")
+
+        with self._lock:
+            for chunk_id, locations in list(self.chunk_locations.items()):
+                if dead_node_id in locations:
+                    # Remove the broken node identifier from the location list
+                    locations.remove(dead_node_id)
+
+                    if not locations:
+                        logging.error(f"[Recovery Critical] Chunk {chunk_id} lost all replicas! Permanent data loss.")
+                        continue
+
+                    # Locate a healthy server that does not already hold this chunk
+                    source_node = locations[0]
+                    source_address = self.active_chunkservers.get(source_node)
+
+                    available_replacements = [
+                        node for node in self.active_chunkservers.keys() 
+                        if node not in locations
+                    ]
+
+                    if not available_replacements:
+                        logging.warning(f"[Recovery Stalled] No alternative storage targets available for chunk {chunk_id}")
+                        continue
+
+                    target_node = available_replacements[0]
+                    target_address = self.active_chunkservers[target_node]
+
+                    # Fire an independent background worker thread to execute the inter-container clone
+                    threading.Thread(
+                        target=self._send_replicate_command, 
+                        args=(chunk_id, source_address, target_node, target_address),
+                        daemon=True
+                    ).start()
+
+    def _send_replicate_command(self, chunk_id: str, source_address: str, target_node: str, target_address: str):
+        """Instructs the replacement chunkserver to pull data from a healthy source replica."""
+        try:
+            # Establish gRPC connection directly to the destination replacement chunkserver
+            channel = grpc.insecure_channel(target_address)
+            stub = gfs_pb2_grpc.ChunkServiceStub(channel)
+
+            logging.info(f"[Recovery Route] Issuing replicate command for chunk {chunk_id}: {source_address} -> {target_node}")
+            req = gfs_pb2.ReplicateChunkRequest(chunk_id=chunk_id, source_address=source_address)
+            res = stub.ReplicateChunk(req, timeout=5)
+
+            if res.success:
+                with self._lock:
+                    # Register the new target into the authoritative chunk map location array
+                    if chunk_id in self.chunk_locations:
+                        self.chunk_locations[chunk_id].append(target_node)
+                logging.info(f"[Recovery Success] Chunk {chunk_id} successfully restored to {target_node}.")
+        except grpc.RpcError as e:
+            logging.error(f"[Recovery Failed] Failed to replicate chunk {chunk_id} to {target_node}: {e}")
+    
     def _liveness_monitor_loop(self):
         """Runs continuously in the background to check chunkserver health."""
         logging.info("Master liveness monitor thread started.")
@@ -127,6 +184,7 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
 
                             # Remove from active routing lists
                             del self.active_chunkservers[cs_id]
+                            self.trigger_rereplication(cs_id)  # Placeholder for future re-replication logic
 
                             # Day 4 hint: This is where trigger_rereplication() will hook in
                     elif elapsed > 6.0:

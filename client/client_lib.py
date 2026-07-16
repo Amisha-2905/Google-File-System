@@ -34,18 +34,27 @@ class GFSClient:
                 logging.error("No chunkserver targets returned from Master.")
                 return False
                 
-            # Translate internal container network address to host address
-            target_address = self._translate_address(targets[0])
-            logging.info(f"Streaming data directly to translated host address [{target_address}] for chunk {chunk_id}")
+            logging.info(f"Fanning out data to replicas: {targets}")
             
-            cs_channel = grpc.insecure_channel(target_address)
-            cs_stub = gfs_pb2_grpc.ChunkServiceStub(cs_channel)
+            # Broadcast the write operation to all assigned replica nodes
+            success_count = 0
+            for target in targets:
+                translated_address = self._translate_address(target)
+                try:
+                    cs_channel = grpc.insecure_channel(translated_address)
+                    cs_stub = gfs_pb2_grpc.ChunkServiceStub(cs_channel)
+                    
+                    write_req = gfs_pb2.WriteChunkRequest(chunk_id=chunk_id, offset=offset, data=data)
+                    write_res = cs_stub.WriteChunk(write_req, timeout=2)
+                    
+                    if write_res.success:
+                        success_count += 1
+                except grpc.RpcError as e:
+                    logging.warning(f"Failed to write to replica {target}: {e.details()}")
             
-            write_req = gfs_pb2.WriteChunkRequest(chunk_id=chunk_id, offset=offset, data=data)
-            write_res = cs_stub.WriteChunk(write_req)
-            
-            if write_res.success:
-                logging.info("Write pipeline completed successfully!")
+            # For the Day 4 MVP, if we successfully hit at least one replica, we consider it a win
+            if success_count > 0:
+                logging.info(f"Write completed successfully on {success_count}/{len(targets)} replicas!")
                 return True
             return False
             
