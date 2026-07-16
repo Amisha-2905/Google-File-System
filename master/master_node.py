@@ -3,7 +3,8 @@ import logging
 import time
 import grpc
 import threading
-
+import random
+import uuid
 import gfs_pb2
 import gfs_pb2_grpc
 from namespace_manager import NamespaceManager
@@ -53,10 +54,55 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
         return gfs_pb2.HeartbeatReply(command_acknowledged=True)
 
     def CreateFile(self, request, context):
-        raise NotImplementedError("File creation logic planned for Day 3")
+        path = request.path
+
+        # 1. Update the virtual tree namespace
+        if not self.namespace.create_entry(path, is_dir=False):
+            logging.warning(f"[Metadata] Failed to create file {path}. Already exists or parent missing.")
+            context.set_code(grpc.StatusCode.ALREADY_EXISTS)
+            context.set_details("File already exists or invalid path.")
+            return gfs_pb2.CreateFileReply()
+
+        with self._lock:
+            if not self.active_chunkservers:
+                context.set_code(grpc.StatusCode.UNAVAILABLE)
+                context.set_details("No storage chunkservers registered.")
+                return gfs_pb2.CreateFileReply()
+
+            # 2. Allocate a unique chunk ID
+            chunk_id = str(uuid.uuid4())
+
+            # 3. Pick replica targets (Up to 3 based on current active nodes)
+            available_nodes = list(self.active_chunkservers.keys())
+            replica_count = min(3, len(available_nodes))
+            selected_nodes = random.sample(available_nodes, replica_count)
+
+            # Save configuration map
+            self.chunk_locations[chunk_id] = selected_nodes
+
+            # Map file path to its initial chunk index 0
+            if not hasattr(self, 'file_to_chunks'):
+                self.file_to_chunks: dict[str, list[str]] = {}
+            self.file_to_chunks[path] = [chunk_id]
+
+        addresses = [self.active_chunkservers[node] for node in selected_nodes]
+        logging.info(f"[Metadata] File '{path}' allocated chunk {chunk_id} on replicas: {selected_nodes}")
+        return gfs_pb2.CreateFileReply(chunk_id=chunk_id, chunkserver_addresses=addresses)
 
     def GetChunkLocations(self, request, context):
-        raise NotImplementedError("Chunk location resolution planned for Day 3")
+        path = request.path
+        chunk_index = request.chunk_index
+
+        with self._lock:
+            if path not in getattr(self, 'file_to_chunks', {}) or chunk_index >= len(self.file_to_chunks[path]):
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                return gfs_pb2.ChunkLocationsReply()
+
+            chunk_id = self.file_to_chunks[path][chunk_index]
+            nodes = self.chunk_locations.get(chunk_id, [])
+            addresses = [self.active_chunkservers[node] for node in nodes]
+
+        return gfs_pb2.ChunkLocationsReply(chunk_id=chunk_id, chunkserver_addresses=addresses)
 
     def DeleteFile(self, request, context):
         raise NotImplementedError("Lazy garbage collection logic planned for Day 8")

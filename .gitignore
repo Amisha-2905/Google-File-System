@@ -17,3 +17,8 @@ _data/
 master/gfs_master.log
 master/metadata.log
 chunkserver/chunk_storage_*/
+
+# Ignore root-level gRPC generated stubs used for host testing
+/gfs_pb2.py
+/gfs_pb2_grpc.py
+/gfs_pb2.pyi

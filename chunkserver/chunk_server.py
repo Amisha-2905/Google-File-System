@@ -9,11 +9,49 @@ import gfs_pb2
 import gfs_pb2_grpc
 
 class ChunkServer(gfs_pb2_grpc.ChunkServiceServicer):
+    def __init__(self):
+        # Chunks will be stored inside the container volume path
+        self.storage_dir = "/data"
+        os.makedirs(self.storage_dir, exist_ok=True)
+        logging.info(f"Storage directory initialized at: {self.storage_dir}")
+
+    def _get_chunk_path(self, chunk_id: str) -> str:
+        return os.path.join(self.storage_dir, f"chunk_{chunk_id}.bin")
+
     def ReadChunk(self, request, context):
-        raise NotImplementedError("Data I/O paths planned for Day 3")
+        chunk_path = self._get_chunk_path(request.chunk_id)
+
+        if not os.path.exists(chunk_path):
+            logging.error(f"[IO Error] Chunk {request.chunk_id} not found.")
+            return gfs_pb2.ReadChunkReply(success=False, data=b"")
+
+        try:
+            with open(chunk_path, "rb") as f:
+                f.seek(request.offset)
+                data = f.read(request.length)
+            logging.info(f"[IO Success] Read {len(data)} bytes from chunk {request.chunk_id}")
+            return gfs_pb2.ReadChunkReply(success=True, data=data)
+        except Exception as e:
+            logging.error(f"[IO Fail] Failed reading chunk {request.chunk_id}: {e}")
+            return gfs_pb2.ReadChunkReply(success=False, data=b"")
 
     def WriteChunk(self, request, context):
-        raise NotImplementedError("Data I/O paths planned for Day 3")
+        chunk_path = self._get_chunk_path(request.chunk_id)
+
+        try:
+            # Open in 'rb+' if it exists to overwrite offsets, or 'wb+' if new
+            mode = "rb+" if os.path.exists(chunk_path) else "wb+"
+            with open(chunk_path, mode) as f:
+                if mode == "wb+":
+                    # Pre-allocate zero bytes to maintain fixed size structure easily
+                    f.write(b'\x00' * (1024 * 1024)) # 1MB pre-allocation 
+                f.seek(request.offset)
+                f.write(request.data)
+            logging.info(f"[IO Success] Wrote {len(request.data)} bytes to chunk {request.chunk_id} at offset {request.offset}")
+            return gfs_pb2.WriteChunkReply(success=True)
+        except Exception as e:
+            logging.error(f"[IO Fail] Failed writing chunk {request.chunk_id}: {e}")
+            return gfs_pb2.WriteChunkReply(success=False)
 
     def AppendRecord(self, request, context):
         raise NotImplementedError("Atomic appends planned for Day 6")
