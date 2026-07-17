@@ -15,12 +15,14 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
         self.chunk_locations: dict[str, list[str]] = {}
         self.active_chunkservers: dict[str, str] = {} 
         self.last_seen: dict[str, float] = {}         
-
         self.dead_chunkservers: set[str] = set()
-        self._lock = threading.RLock()                 
+        self._lock = threading.RLock()
+
+        self.lease_holder: dict[str, tuple[str, float]] = {}  # chunk_id -> (chunkserver_id, expiry_time) 
+        self.chunk_versions: dict[str, int] = {}              # chunk_id -> version_number [cite: 71]
 
         self.monitor_thread = threading.Thread(target=self._liveness_monitor_loop, daemon=True)
-        self.monitor_thread.start()               # Protects cluster metadata structures
+        self.monitor_thread.start()
 
     def RegisterChunkserver(self, request, context):
         chunkserver_id = request.chunkserver_id
@@ -189,6 +191,41 @@ class MasterNode(gfs_pb2_grpc.MasterServiceServicer):
                             # Day 4 hint: This is where trigger_rereplication() will hook in
                     elif elapsed > 6.0:
                         logging.warning(f"[LIVENESS WARNING] Node '{cs_id}' hasn't reported for {elapsed:.1f}s. Suspecting degradation.")
+
+    def _get_or_grant_lease(self, chunk_id: str) -> tuple[str, list[str]]:
+        """Ensures a valid lease exists for a chunk and returns (primary_address, secondary_addresses)."""
+        now = time.time()
+        replicas = self.chunk_locations.get(chunk_id, [])
+        
+        if not replicas:
+            raise ValueError(f"No replicas available for chunk {chunk_id}")
+
+        # Check if a valid lease already exists 
+        if chunk_id in self.lease_holder:
+            primary_id, expiry = self.lease_holder[chunk_id]
+            if now < expiry and primary_id in self.active_chunkservers:
+                primary_addr = self.active_chunkservers[primary_id]
+                secondaries = [self.active_chunkservers[r] for r in replicas if r != primary_id]
+                return primary_addr, secondaries
+
+        # No valid lease exists; select a new primary and increment version 
+        # We filter out any dead/inactive servers first
+        available_replicas = [r for r in replicas if r in self.active_chunkservers]
+        if not available_replicas:
+            raise ValueError(f"No active replicas to grant lease for chunk {chunk_id}")
+        
+        primary_id = available_replicas[0] # Pick the first available active replica as primary
+        expiry_time = now + 60.0            # 60-second lease window 
+        
+        self.lease_holder[chunk_id] = (primary_id, expiry_time)
+        
+        # Increment version number on lease grant [cite: 71]
+        self.chunk_versions[chunk_id] = self.chunk_versions.get(chunk_id, 0) + 1
+        logging.info(f"[Lease Engine] Granted lease on chunk {chunk_id} to {primary_id} (v{self.chunk_versions[chunk_id]}) expiring in 60s.")
+        
+        primary_addr = self.active_chunkservers[primary_id]
+        secondaries = [self.active_chunkservers[r] for r in replicas if r != primary_id]
+        return primary_addr, secondaries
 
 def serve():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

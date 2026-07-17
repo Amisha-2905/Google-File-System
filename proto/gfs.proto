@@ -138,14 +138,11 @@ message ReadChunkReply {
 }
 
 message WriteChunkRequest {
-  // Chunk being modified.
   string chunk_id = 1;
-
-  // Byte offset inside the chunk.
   int32 offset = 2;
-
-  // Bytes to write.
   bytes data = 3;
+  repeated string secondary_addresses = 4;
+  int32 version = 5;
 }
 
 message WriteChunkReply {

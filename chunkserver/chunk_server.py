@@ -37,20 +37,48 @@ class ChunkServer(gfs_pb2_grpc.ChunkServiceServicer):
 
     def WriteChunk(self, request, context):
         chunk_path = self._get_chunk_path(request.chunk_id)
-
+        
+        # Low-level disk pre-allocation and seeking logic from Day 3 [cite: 456]
         try:
-            # Open in 'rb+' if it exists to overwrite offsets, or 'wb+' if new
             mode = "rb+" if os.path.exists(chunk_path) else "wb+"
             with open(chunk_path, mode) as f:
                 if mode == "wb+":
-                    # Pre-allocate zero bytes to maintain fixed size structure easily
-                    f.write(b'\x00' * (1024 * 1024)) # 1MB pre-allocation 
+                    f.write(b'\x00' * (1024 * 1024))
                 f.seek(request.offset)
                 f.write(request.data)
-            logging.info(f"[IO Success] Wrote {len(request.data)} bytes to chunk {request.chunk_id} at offset {request.offset}")
+            
+            logging.info(f"[Storage Engine] Local commit successful for chunk {request.chunk_id}")
+            
+            # PRIMARY LEASE ROUTING LOGIC 
+            # If secondary addresses are provided, this node is acting as the primary coordinator 
+            if request.secondary_addresses:
+                logging.info(f"[Primary Lease] Coordinating write for {len(request.secondary_addresses)} secondaries...")
+                
+                for sec_address in request.secondary_addresses:
+                    try:
+                        # Forward the mutation request to the secondary down the line 
+                        channel = grpc.insecure_channel(sec_address)
+                        stub = gfs_pb2_grpc.ChunkServiceStub(channel)
+                        
+                        # Strip secondary addresses to let the node know it's a secondary executor
+                        forward_req = gfs_pb2.WriteChunkRequest(
+                            chunk_id=request.chunk_id,
+                            offset=request.offset,
+                            data=request.data,
+                            secondary_addresses=[],
+                            version=request.version
+                        )
+                        res = stub.WriteChunk(forward_req, timeout=3)
+                        if not res.success:
+                            logging.error(f"[Replication Error] Secondary {sec_address} failed mutation.")
+                            return gfs_pb2.WriteChunkReply(success=False)
+                    except grpc.RpcError as e:
+                        logging.error(f"[Network Error] Failed forwarding to secondary {sec_address}: {e}")
+                        return gfs_pb2.WriteChunkReply(success=False)
+                        
             return gfs_pb2.WriteChunkReply(success=True)
         except Exception as e:
-            logging.error(f"[IO Fail] Failed writing chunk {request.chunk_id}: {e}")
+            logging.error(f"[IO Fail] Failed writing block: {e}")
             return gfs_pb2.WriteChunkReply(success=False)
 
     def AppendRecord(self, request, context):

@@ -23,43 +23,35 @@ class GFSClient:
 
     def write(self, path: str, data: bytes, offset: int = 0):
         try:
-            logging.info(f"Requesting file creation from Master: {path}")
+            logging.info(f"Querying Master for chunk allocations: {path}")
             req = gfs_pb2.CreateFileRequest(path=path)
             res = self.master_stub.CreateFile(req)
             
             chunk_id = res.chunk_id
-            targets = res.chunkserver_addresses
             
-            if not targets:
-                logging.error("No chunkserver targets returned from Master.")
-                return False
-                
-            logging.info(f"Fanning out data to replicas: {targets}")
+            # Day 5 Architecture Update: Master provides primary/secondary configuration profiles 
+            # For testing with address translation, we intercept targets [cite: 514]
+            primary = self._translate_address(res.chunkserver_addresses[0])
+            secondaries = list(res.chunkserver_addresses[1:])
+            logging.info(f"Streaming data directly to Primary replica [{primary}]...")
             
-            # Broadcast the write operation to all assigned replica nodes
-            success_count = 0
-            for target in targets:
-                translated_address = self._translate_address(target)
-                try:
-                    cs_channel = grpc.insecure_channel(translated_address)
-                    cs_stub = gfs_pb2_grpc.ChunkServiceStub(cs_channel)
-                    
-                    write_req = gfs_pb2.WriteChunkRequest(chunk_id=chunk_id, offset=offset, data=data)
-                    write_res = cs_stub.WriteChunk(write_req, timeout=2)
-                    
-                    if write_res.success:
-                        success_count += 1
-                except grpc.RpcError as e:
-                    logging.warning(f"Failed to write to replica {target}: {e.details()}")
+            cs_channel = grpc.insecure_channel(primary)
+            cs_stub = gfs_pb2_grpc.ChunkServiceStub(cs_channel)
             
-            # For the Day 4 MVP, if we successfully hit at least one replica, we consider it a win
-            if success_count > 0:
-                logging.info(f"Write completed successfully on {success_count}/{len(targets)} replicas!")
-                return True
-            return False
+            # The client provides the secondaries list to let the primary coordinate replication 
+            write_req = gfs_pb2.WriteChunkRequest(
+                chunk_id=chunk_id,
+                offset=offset,
+                data=data,
+                secondary_addresses=secondaries,
+                version=1  # Version tracking placeholder
+            )
+            
+            write_res = cs_stub.WriteChunk(write_req, timeout=5)
+            return write_res.success
             
         except grpc.RpcError as e:
-            logging.error(f"Client operation failed: {e.details()}")
+            logging.error(f"Write sequence rejected: {e.details()}")
             return False
 
     def read(self, path: str, offset: int = 0, length: int = 1024) -> bytes:
